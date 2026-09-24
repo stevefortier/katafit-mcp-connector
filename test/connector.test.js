@@ -128,7 +128,7 @@ test('camera-only registration serves MCP discovery and one snapshot without a l
   socket.emit('message', JSON.stringify({ type: 'registered', connection_id: 'x' }));
   socket.emit('message', JSON.stringify({ type: 'mcp', payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' } }));
   assert.deepEqual(socket.sent.at(-1).payload.result.tools.map(tool => tool.name), ['katafit_camera_snapshot']);
-  socket.emit('message', JSON.stringify({ type: 'mcp', payload: { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'katafit_camera_snapshot', arguments: { camera: 'camera_1' } } } }));
+  socket.emit('message', JSON.stringify({ type: 'mcp', payload: { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'katafit_camera_snapshot', arguments: { camera_id: 'camera_1' } } } }));
   await tick();
   assert.equal(socket.sent.at(-1).payload.result.content[0].type, 'image');
   await connector.stop();
@@ -173,7 +173,7 @@ test('camera-only relay request_id is returned on image response', async () => {
     await connector.start(); socket.emit('open'); socket.emit('message', JSON.stringify({ type: 'registered', connection_id: 'x' }));
     socket.emit('message', JSON.stringify({ type: 'mcp', request_id: 'discover-1', payload: { method: 'tools/list' } }));
     assert.equal(socket.sent.at(-1).request_id, 'discover-1');
-    socket.emit('message', JSON.stringify({ type: 'mcp', request_id: 'capture-1', payload: { method: 'tools/call', params: { name: 'katafit_camera_snapshot', arguments: { camera: 'camera_1' } } } }));
+    socket.emit('message', JSON.stringify({ type: 'mcp', request_id: 'capture-1', payload: { method: 'tools/call', params: { name: 'katafit_camera_snapshot', arguments: { camera_id: 'camera_1' } } } }));
     await tick();
     assert.equal(socket.sent.at(-1).request_id, 'capture-1');
     assert.equal(socket.sent.at(-1).payload.result.content[0].type, 'image');
@@ -247,7 +247,7 @@ test('late frames from a replaced relay socket cannot request a new camera captu
     await new Promise(resolve => setTimeout(resolve, 10));
     sockets[1].emit('open');
     sockets[1].emit('message', JSON.stringify({ type: 'registered', connection_id: 'new', session_token: 'two' }));
-    sockets[0].emit('message', JSON.stringify({ type: 'mcp', request_id: 'stale', payload: { method: 'tools/call', params: { name: 'katafit_camera_snapshot', arguments: { camera: 'camera_1' } } } }));
+    sockets[0].emit('message', JSON.stringify({ type: 'mcp', request_id: 'stale', payload: { method: 'tools/call', params: { name: 'katafit_camera_snapshot', arguments: { camera_id: 'camera_1' } } } }));
     await tick();
     assert.equal(calls, 0);
   } finally { await connector.stop(); }
@@ -263,7 +263,7 @@ test('snapshot captured before relay disconnect is not released on a new socket'
   try {
     await connector.start(); sockets[0].emit('open');
     sockets[0].emit('message', JSON.stringify({ type: 'registered', connection_id: 'old', session_token: 'one' }));
-    sockets[0].emit('message', JSON.stringify({ type: 'mcp', request_id: 'old-capture', payload: { method: 'tools/call', params: { name: 'katafit_camera_snapshot', arguments: { camera: 'camera_1' } } } }));
+    sockets[0].emit('message', JSON.stringify({ type: 'mcp', request_id: 'old-capture', payload: { method: 'tools/call', params: { name: 'katafit_camera_snapshot', arguments: { camera_id: 'camera_1' } } } }));
     sockets[0].emit('close');
     await new Promise(resolve => setTimeout(resolve, 10));
     sockets[1].emit('open');

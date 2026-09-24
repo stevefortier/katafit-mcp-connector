@@ -38,8 +38,8 @@ export class CameraTools {
       description: 'Capture one current still JPEG from a webcam explicitly enabled by the device owner. The image may contain people and private surroundings; use only when needed for the user request.',
       inputSchema: {
         type: 'object', additionalProperties: false,
-        properties: { camera: { type: 'string', enum: this.devices.map((_, index) => `camera_${index + 1}`), description: 'The enabled camera to capture.' } },
-        required: ['camera'],
+        properties: { camera_id: { type: 'string', enum: this.devices.map((_, index) => `camera_${index + 1}`), description: 'The enabled camera to capture.' } },
+        required: ['camera_id'],
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     }];
@@ -47,9 +47,9 @@ export class CameraTools {
 
   async callTool(name, args) {
     if (name !== CAMERA_TOOL_NAME || !this.devices.length) throw new Error('Camera tool not enabled');
-    const match = /^camera_([1-4])$/.exec(args?.camera || '');
+    const match = /^camera_([1-4])$/.exec(args?.camera_id || '');
     const device = match && this.devices[Number(match[1]) - 1];
-    if (!device || Object.keys(args).some(key => key !== 'camera')) throw new Error('Camera not enabled');
+    if (!device || Object.keys(args).some(key => key !== 'camera_id')) throw new Error('Camera not enabled');
     if (this.busy) throw new Error('Camera capture already in progress');
     this.busy = true;
     const generation = this.captureGeneration;

@@ -30,7 +30,7 @@ test('real loopback WebSocket transports a bounded synthetic ffmpeg camera JPEG 
     const discovered = await nextMessage(socket);
     assert.equal(discovered.request_id, 'discover');
     assert.equal(discovered.payload.result.tools[0].name, 'katafit_camera_snapshot');
-    socket.send(JSON.stringify({ type: 'mcp', request_id: 'snapshot', payload: { method: 'tools/call', params: { name: 'katafit_camera_snapshot', arguments: { camera: 'camera_1' } } } }));
+    socket.send(JSON.stringify({ type: 'mcp', request_id: 'snapshot', payload: { method: 'tools/call', params: { name: 'katafit_camera_snapshot', arguments: { camera_id: 'camera_1' } } } }));
     const response = await nextMessage(socket);
     assert.equal(response.request_id, 'snapshot');
     const image = response.payload.result.content[0];
