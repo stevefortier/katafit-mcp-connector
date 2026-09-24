@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { spawn as nodeSpawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import Ws from 'ws';
@@ -52,7 +53,6 @@ export class Connector extends EventEmitter {
     this.camera = options.camera || null;
     this.pendingToolLists = new Set();
     this.relayRequests = new Map();
-    this.nextLocalId = 1;
     this.socket = null;
     this.registered = false;
     this.stopped = true;
@@ -88,6 +88,7 @@ export class Connector extends EventEmitter {
     this.registered = false;
     this.pendingToolLists.clear();
     this.relayRequests.clear();
+    this.camera?.cancelCurrent?.();
     clearTimeout(this.reconnectTimer);
     clearInterval(this.heartbeatTimer);
     this.reconnectTimer = this.heartbeatTimer = null;
@@ -113,6 +114,7 @@ export class Connector extends EventEmitter {
       this.registered = false;
       this.pendingToolLists.clear();
       this.relayRequests.clear();
+      this.camera?.cancelCurrent?.();
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
       this.#scheduleReconnect();
@@ -137,10 +139,10 @@ export class Connector extends EventEmitter {
   }
 
   #receiveMcp(incoming, requestId) {
-    const payload = requestId
-      ? { ...incoming, jsonrpc: '2.0', id: this.nextLocalId++ }
-      : incoming;
-    if (requestId) this.relayRequests.set(payload.id, requestId);
+    const hasResponse = requestId || incoming.id !== undefined;
+    const localId = hasResponse ? `katafit_${randomUUID()}` : undefined;
+    const payload = hasResponse ? { ...incoming, jsonrpc: '2.0', id: localId } : incoming;
+    if (hasResponse) this.relayRequests.set(localId, { requestId, originalId: incoming.id });
     if (!this.camera?.listTools().length) {
       this.child.stdin.write(encodeMcpMessage(payload));
       return;
@@ -171,17 +173,21 @@ export class Connector extends EventEmitter {
 
   #sendMcp(payload) {
     if (!this.registered) return;
-    // A response to an expired/revoked relay request must never be sent on a new socket.
-    if (typeof payload.id === 'number' && payload.id > 0 && payload.id < this.nextLocalId && !this.relayRequests.has(payload.id)) return;
+    // Drop old, unsolicited, or already-consumed responses rather than sending
+    // potentially sensitive child data on a different relay socket.
+    const correlation = this.relayRequests.get(payload.id);
+    if (payload.id !== undefined && !correlation) return;
     if (this.pendingToolLists.delete(payload.id)) {
       const tools = Array.isArray(payload.result?.tools)
         ? payload.result.tools.filter(tool => tool.name !== CAMERA_TOOL_NAME)
         : [];
       payload = { jsonrpc: '2.0', id: payload.id, result: { tools: [...tools, ...this.camera.listTools()] } };
     }
-    const requestId = this.relayRequests.get(payload.id);
-    if (requestId) this.relayRequests.delete(payload.id);
-    this.#send({ type: 'mcp', ...(requestId ? { request_id: requestId } : {}), payload });
+    if (correlation) {
+      this.relayRequests.delete(payload.id);
+      payload = { ...payload, id: correlation.originalId === undefined ? payload.id : correlation.originalId };
+    }
+    this.#send({ type: 'mcp', ...(correlation?.requestId ? { request_id: correlation.requestId } : {}), payload });
   }
   #send(message) { if (this.socket?.readyState === this.WebSocket.OPEN || this.socket?.readyState === 1) this.socket.send(JSON.stringify(message)); }
 

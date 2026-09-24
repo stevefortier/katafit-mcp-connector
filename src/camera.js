@@ -14,6 +14,13 @@ export class CameraTools {
     this.spawn = spawn;
     this.stat = stat;
     this.busy = false;
+    this.captureGeneration = 0;
+    this.abortCurrent = null;
+  }
+
+  cancelCurrent() {
+    this.captureGeneration += 1;
+    this.abortCurrent?.();
   }
 
   async verifyDevices(devices = this.devices) {
@@ -45,8 +52,10 @@ export class CameraTools {
     if (!device || Object.keys(args).some(key => key !== 'camera')) throw new Error('Camera not enabled');
     if (this.busy) throw new Error('Camera capture already in progress');
     this.busy = true;
+    const generation = this.captureGeneration;
     try {
       await this.verifyDevices([device]);
+      if (generation !== this.captureGeneration) throw new Error('Camera capture cancelled');
       const bytes = await this.#capture(device);
       return { content: [{ type: 'image', mimeType: 'image/jpeg', data: bytes.toString('base64') }] };
     } finally {
@@ -68,8 +77,13 @@ export class CameraTools {
       const finish = (error, bytes) => {
         if (settled) return;
         settled = true;
+        this.abortCurrent = null;
         clearTimeout(timer);
         if (error) reject(error); else resolve(bytes);
+      };
+      this.abortCurrent = () => {
+        finish(new Error('Camera capture cancelled'));
+        try { child.kill('SIGKILL'); } catch {}
       };
       child.stdout.on('data', chunk => {
         total += chunk.length;

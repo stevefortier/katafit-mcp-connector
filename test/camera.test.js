@@ -42,6 +42,19 @@ test('non-character devices are rejected before any capture subprocess starts', 
   assert.equal(spawned, false);
 });
 
+test('stopping camera capture kills the active ffmpeg child without delivering image', async () => {
+  let killed = false;
+  const child = new EventEmitter(); child.stdout = new EventEmitter();
+  child.kill = () => { killed = true; child.emit('close', 1); };
+  const camera = new CameraTools({ devices: ['/dev/video0'], platform: 'linux',
+    stat: async () => ({ isCharacterDevice: () => true }), spawn: () => child });
+  const capture = camera.callTool('katafit_camera_snapshot', { camera: 'camera_1' });
+  await new Promise(resolve => setImmediate(resolve));
+  camera.cancelCurrent();
+  assert.equal(killed, true);
+  await assert.rejects(capture, /capture/);
+});
+
 test('oversized and non-JPEG capture fails without image output', async () => {
   for (const bytes of [Buffer.alloc(1_100_000), Buffer.from('not a jpeg')]) {
     const camera = new CameraTools({ devices: ['/dev/video0'], platform: 'linux',

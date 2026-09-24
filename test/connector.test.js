@@ -40,9 +40,10 @@ test('registers with the relay and proxies MCP messages in both directions', asy
   socket.emit('message', Buffer.from(JSON.stringify({ type: 'registered', connection_id: 'conn-1', session_token: 'session-1' })));
   socket.emit('message', JSON.stringify({ type: 'mcp', payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' } }));
   assert.equal(child.stdin.writes.length, 1);
-  assert.equal(child.stdin.writes[0], encodeMcpMessage({ jsonrpc: '2.0', id: 1, method: 'tools/list' }));
+  const localId = JSON.parse(child.stdin.writes[0].split('\r\n\r\n')[1]).id;
+  assert.ok(localId);
 
-  child.stdout.emit('data', Buffer.from(encodeMcpMessage({ jsonrpc: '2.0', id: 1, result: { tools: [] } })));
+  child.stdout.emit('data', Buffer.from(encodeMcpMessage({ jsonrpc: '2.0', id: localId, result: { tools: [] } })));
   assert.deepEqual(socket.sent.at(-1), { type: 'mcp', payload: { jsonrpc: '2.0', id: 1, result: { tools: [] } } });
   await connector.stop();
 });
@@ -140,10 +141,11 @@ test('embedded camera is discoverable alongside a local MCP child without interc
     WebSocket: class { constructor() { return socket; } }, child });
   await connector.start(); socket.emit('open'); socket.emit('message', JSON.stringify({ type: 'registered', connection_id: 'x' }));
   socket.emit('message', JSON.stringify({ type: 'mcp', payload: { jsonrpc: '2.0', id: 3, method: 'tools/list' } }));
-  child.stdout.emit('data', Buffer.from(encodeMcpMessage({ jsonrpc: '2.0', id: 3, result: { tools: [{ name: 'other_tool' }] } })));
+  const listedId = JSON.parse(child.stdin.writes.at(-1).split('\r\n\r\n')[1]).id;
+  child.stdout.emit('data', Buffer.from(encodeMcpMessage({ jsonrpc: '2.0', id: listedId, result: { tools: [{ name: 'other_tool' }] } })));
   assert.deepEqual(socket.sent.at(-1).payload.result.tools.map(tool => tool.name), ['other_tool', 'katafit_camera_snapshot']);
   socket.emit('message', JSON.stringify({ type: 'mcp', payload: { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'other_tool' } } }));
-  assert.equal(child.stdin.writes.at(-1), encodeMcpMessage({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'other_tool' } }));
+  assert.equal(JSON.parse(child.stdin.writes.at(-1).split('\r\n\r\n')[1]).params.name, 'other_tool');
   await connector.stop();
 });
 
@@ -178,6 +180,24 @@ test('camera-only relay request_id is returned on image response', async () => {
   } finally { await connector.stop(); }
 });
 
+test('legacy and relay-correlated calls cannot collide or misattribute responses', async () => {
+  const socket = new FakeSocket(); const child = new FakeChild();
+  const connector = new Connector({ relayUrl: 'ws://relay', serverId: 'srv', enrollmentToken: 'secret',
+    WebSocket: class { constructor() { return socket; } }, child });
+  try {
+    await connector.start(); socket.emit('open'); socket.emit('message', JSON.stringify({ type: 'registered', connection_id: 'x' }));
+    socket.emit('message', JSON.stringify({ type: 'mcp', payload: { jsonrpc: '2.0', id: 1, method: 'ping' } }));
+    socket.emit('message', JSON.stringify({ type: 'mcp', request_id: 'new', payload: { method: 'ping' } }));
+    const ids = child.stdin.writes.map(value => JSON.parse(value.split('\r\n\r\n')[1]).id);
+    assert.notEqual(ids[0], ids[1]);
+    child.stdout.emit('data', Buffer.from(encodeMcpMessage({ jsonrpc: '2.0', id: ids[0], result: { source: 'legacy' } })));
+    assert.equal(socket.sent.at(-1).request_id, undefined);
+    assert.equal(socket.sent.at(-1).payload.result.source, 'legacy');
+    child.stdout.emit('data', Buffer.from(encodeMcpMessage({ jsonrpc: '2.0', id: ids[1], result: { source: 'relay' } })));
+    assert.equal(socket.sent.at(-1).request_id, 'new');
+  } finally { await connector.stop(); }
+});
+
 test('correlates real relay request_id with a local MCP response lacking an incoming JSON-RPC id', async () => {
   const socket = new FakeSocket(); const child = new FakeChild();
   const connector = new Connector({ relayUrl: 'ws://relay', serverId: 'srv', enrollmentToken: 'secret',
@@ -191,6 +211,25 @@ test('correlates real relay request_id with a local MCP response lacking an inco
     assert.ok(id !== undefined);
     child.stdout.emit('data', Buffer.from(encodeMcpMessage({ jsonrpc: '2.0', id, result: { tools: [] } })));
     assert.deepEqual(socket.sent.at(-1), { type: 'mcp', request_id: 'relay-123', payload: { jsonrpc: '2.0', id, result: { tools: [] } } });
+  } finally { await connector.stop(); }
+});
+
+test('late child response for previous relay socket is discarded after reconnect', async () => {
+  const sockets = []; const child = new FakeChild();
+  class Socket extends FakeSocket { constructor() { super(); sockets.push(this); } }
+  const connector = new Connector({ relayUrl: 'ws://relay', serverId: 'srv', enrollmentToken: 'secret', child,
+    WebSocket: Socket, reconnect: { minMs: 1, maxMs: 2 } });
+  try {
+    await connector.start(); sockets[0].emit('open');
+    sockets[0].emit('message', JSON.stringify({ type: 'registered', connection_id: 'old', session_token: 'one' }));
+    sockets[0].emit('message', JSON.stringify({ type: 'mcp', request_id: 'old', payload: { method: 'tools/list' } }));
+    const oldId = JSON.parse(child.stdin.writes.at(-1).split('\r\n\r\n')[1]).id;
+    sockets[0].emit('close');
+    await new Promise(resolve => setTimeout(resolve, 10));
+    sockets[1].emit('open');
+    sockets[1].emit('message', JSON.stringify({ type: 'registered', connection_id: 'new', session_token: 'two' }));
+    child.stdout.emit('data', Buffer.from(encodeMcpMessage({ jsonrpc: '2.0', id: oldId, result: { private: 'old-photo' } })));
+    assert.equal(sockets[1].sent.some(frame => JSON.stringify(frame).includes('old-photo')), false);
   } finally { await connector.stop(); }
 });
 
