@@ -30,6 +30,21 @@ Replace the example MCP command with the local server you actually intend to exp
 
 The same values can be supplied with `--relay-url`, `--server-id`, and `--enrollment-token` (avoid passing secrets as CLI arguments), or with the corresponding `KATAFIT_RELAY_URL`, `KATAFIT_SERVER_ID`, and `KATAFIT_ENROLLMENT_TOKEN` environment variables.
 
+## Optional embedded webcam snapshots (Linux)
+
+**Off by default.** On Linux, install `ffmpeg` and identify your video capture device(s) (for example `v4l2-ctl --list-devices` from `v4l-utils`, then check which `/dev/videoN` captures an image). Give the connector explicit access to only the devices you choose:
+
+```sh
+# After setting KATAFIT_RELAY_URL, KATAFIT_SERVER_ID and KATAFIT_ENROLLMENT_TOKEN as above:
+node bin/katafit-mcp-connector.js --camera-device /dev/video0
+# Optional: also expose a second selected camera, alongside your existing MCP server:
+node bin/katafit-mcp-connector.js --camera-device /dev/video0 --camera-device /dev/video2 -- <your-mcp-command> [arguments]
+```
+
+Use **one** of those launch commands, not both. Register a new personal server in Kata.fit for the camera-only process, or run the combined command under an existing *new* registration. The example token is still entered privately as described above. A connector process uses one registration; it does not register local servers automatically. Never pass your enrollment token on the command line.
+
+The `katafit_camera_snapshot` tool exposes only the selected cameras as `camera_1` through `camera_4`. Each call captures a **single**, low-resolution JPEG (not a live stream), in memory, and sends it across the outbound relay to Kata.fit; no snapshot is saved to disk by the connector. The call is bounded by a short timeout and the relay size limit. A camera light may turn on while capturing. A successfully requested frame is sent to Kata.fit and may be forwarded to your configured Coach model provider for visual analysis; review that provider’s data terms before enabling it. The connector makes the tool callable without per-snapshot confirmation once enabled; Kata.fit's hosted personal Coach integration requires an affirmative current-turn snapshot request and limits capture attempts to one per message. Other personal MCP tools may be available to your current Dojo Coach, but this webcam snapshot integration is currently limited to personal Coach and personal registrations. Images may include people or your surroundings, so do not enable a camera where bystanders may be filmed without their consent. To revoke future capture, stop the connector and remove its server registration in Kata.fit. The device OS may also require video-device permissions. This release supports Linux V4L2 `/dev/videoN` devices only; macOS, Windows, mobile, browser permission dialogs and streaming video are not supported. A `Connected` transport badge is not proof that the Coach can see the image: the app's image-result consumption must be verified separately.
+
 ## Relay protocol
 
 1. Connector opens the configured WebSocket.
@@ -40,9 +55,9 @@ The same values can be supplied with `--relay-url`, `--server-id`, and `--enroll
    ```
 
 3. Relay confirms registration with a connection ID and an in-memory session token. On network reconnect the connector sends `resume` with its server ID and session token instead of spending the enrollment token again.
-4. After registration, MCP JSON-RPC objects flow in an explicit envelope:
-   - relay → connector: `{"type":"mcp","payload":<JSON-RPC object>}`
-   - connector → relay: `{"type":"mcp","payload":<JSON-RPC object>}`
+4. After registration, MCP JSON-RPC objects flow in an explicit envelope. A relay request supplies `request_id` (its authoritative correlation key) and may omit a JSON-RPC `id`. The connector assigns a local request ID for the MCP server and returns the matching `request_id` on its response:
+   - relay → connector: `{"type":"mcp","request_id":"...","payload":{"method":"tools/list"}}`
+   - connector → relay: `{"type":"mcp","request_id":"...","payload":{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}}`
 5. The connector sends `{"type":"heartbeat"}` at the application heartbeat
    interval (30 seconds by default; use `--heartbeat-ms` to override).
 

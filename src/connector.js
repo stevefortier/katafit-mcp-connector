@@ -1,6 +1,8 @@
+import { randomUUID } from 'node:crypto';
 import { spawn as nodeSpawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import Ws from 'ws';
+import { CAMERA_TOOL_NAME } from './camera.js';
 
 const PROTOCOL_VERSION = '1';
 
@@ -48,6 +50,9 @@ export class Connector extends EventEmitter {
     this.backoff = { minMs: 1_000, maxMs: 30_000, ...(options.reconnect || {}) };
     this.logger = options.logger || console;
     this.child = options.child || null;
+    this.camera = options.camera || null;
+    this.pendingToolLists = new Set();
+    this.relayRequests = new Map();
     this.socket = null;
     this.registered = false;
     this.stopped = true;
@@ -62,8 +67,7 @@ export class Connector extends EventEmitter {
   async start() {
     if (!this.stopped) return;
     this.stopped = false;
-    if (!this.child) {
-      if (!this.command) throw new Error('command is required');
+    if (!this.child && this.command) {
       // The local MCP is untrusted relative to connector enrollment credentials.
       // Keep its normal environment, but never hand it relay authentication secrets.
       const childEnv = { ...process.env };
@@ -71,13 +75,20 @@ export class Connector extends EventEmitter {
       delete childEnv.KATAFIT_SESSION_TOKEN;
       this.child = this.spawn(this.command, this.args, { stdio: ['pipe', 'pipe', 'inherit'], env: childEnv });
     }
-    this.child.stdout.on('data', chunk => this.parser.push(chunk));
-    this.child.on?.('exit', () => { if (!this.stopped) this.#scheduleReconnect(); });
+    if (!this.child && !this.camera?.listTools().length) throw new Error('command or enabled camera is required');
+    if (this.child) {
+      this.child.stdout.on('data', chunk => this.parser.push(chunk));
+      this.child.on?.('exit', () => { if (!this.stopped) this.#scheduleReconnect(); });
+    }
     this.#connect();
   }
 
   async stop() {
     this.stopped = true;
+    this.registered = false;
+    this.pendingToolLists.clear();
+    this.relayRequests.clear();
+    this.camera?.cancelCurrent?.();
     clearTimeout(this.reconnectTimer);
     clearInterval(this.heartbeatTimer);
     this.reconnectTimer = this.heartbeatTimer = null;
@@ -97,10 +108,13 @@ export class Connector extends EventEmitter {
         : { type: 'register', ...(this.serverId ? { server_id: this.serverId } : {}), enrollment_token: this.enrollmentToken, client_name: this.clientName, protocol_version: this.protocolVersion };
       socket.send(JSON.stringify(message));
     });
-    socket.on('message', raw => this.#receive(raw));
+    socket.on('message', raw => { if (socket === this.socket && !this.stopped) this.#receive(raw); });
     socket.on('close', () => {
       if (socket !== this.socket) return;
       this.registered = false;
+      this.pendingToolLists.clear();
+      this.relayRequests.clear();
+      this.camera?.cancelCurrent?.();
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
       this.#scheduleReconnect();
@@ -120,11 +134,61 @@ export class Connector extends EventEmitter {
       this.heartbeatTimer = setInterval(() => this.#send({ type: 'heartbeat' }), this.heartbeatMs);
       this.emit('registered', message.connection_id);
     } else if (message.type === 'mcp' && message.payload && this.registered) {
-      this.child.stdin.write(encodeMcpMessage(message.payload));
+      this.#receiveMcp(message.payload, message.request_id);
     }
   }
 
-  #sendMcp(payload) { if (this.registered) this.#send({ type: 'mcp', payload }); }
+  #receiveMcp(incoming, requestId) {
+    const hasResponse = requestId || incoming.id !== undefined;
+    const localId = hasResponse ? `katafit_${randomUUID()}` : undefined;
+    const payload = hasResponse ? { ...incoming, jsonrpc: '2.0', id: localId } : incoming;
+    if (hasResponse) this.relayRequests.set(localId, { requestId, originalId: incoming.id });
+    if (!this.camera?.listTools().length) {
+      this.child.stdin.write(encodeMcpMessage(payload));
+      return;
+    }
+    if (payload.method === 'tools/list') {
+      if (this.child) {
+        if (payload.id !== undefined) this.pendingToolLists.add(payload.id);
+        this.child.stdin.write(encodeMcpMessage(payload));
+      } else this.#sendMcp({ jsonrpc: '2.0', id: payload.id, result: { tools: this.camera.listTools() } });
+      return;
+    }
+    if (payload.method === 'tools/call' && payload.params?.name === CAMERA_TOOL_NAME) {
+      const requestedOn = this.socket;
+      this.camera.callTool(payload.params.name, payload.params.arguments || {}).then(result => {
+        if (this.registered && this.socket === requestedOn) this.#sendMcp({ jsonrpc: '2.0', id: payload.id, result });
+      }).catch(() => {
+        if (this.registered && this.socket === requestedOn) this.#sendMcp({ jsonrpc: '2.0', id: payload.id, result: { isError: true, content: [{ type: 'text', text: 'Camera capture unavailable.' }] } });
+      });
+      return;
+    }
+    if (this.child) { this.child.stdin.write(encodeMcpMessage(payload)); return; }
+    if (payload.id === undefined) return; // MCP notifications require no response.
+    if (payload.method === 'initialize') {
+      this.#sendMcp({ jsonrpc: '2.0', id: payload.id, result: { protocolVersion: payload.params?.protocolVersion || '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'katafit-embedded-camera', version: '0.2.0' } } });
+    } else if (payload.method === 'ping') this.#sendMcp({ jsonrpc: '2.0', id: payload.id, result: {} });
+    else this.#sendMcp({ jsonrpc: '2.0', id: payload.id, error: { code: -32601, message: 'Method not found' } });
+  }
+
+  #sendMcp(payload) {
+    if (!this.registered) return;
+    // Drop old, unsolicited, or already-consumed responses rather than sending
+    // potentially sensitive child data on a different relay socket.
+    const correlation = this.relayRequests.get(payload.id);
+    if (payload.id !== undefined && !correlation) return;
+    if (this.pendingToolLists.delete(payload.id)) {
+      const tools = Array.isArray(payload.result?.tools)
+        ? payload.result.tools.filter(tool => tool.name !== CAMERA_TOOL_NAME)
+        : [];
+      payload = { jsonrpc: '2.0', id: payload.id, result: { tools: [...tools, ...this.camera.listTools()] } };
+    }
+    if (correlation) {
+      this.relayRequests.delete(payload.id);
+      payload = { ...payload, id: correlation.originalId === undefined ? payload.id : correlation.originalId };
+    }
+    this.#send({ type: 'mcp', ...(correlation?.requestId ? { request_id: correlation.requestId } : {}), payload });
+  }
   #send(message) { if (this.socket?.readyState === this.WebSocket.OPEN || this.socket?.readyState === 1) this.socket.send(JSON.stringify(message)); }
 
   #scheduleReconnect() {
