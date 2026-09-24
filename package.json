@@ -1,0 +1,19 @@
+{
+  "name": "@kata-fit/mcp-connector",
+  "version": "0.1.0",
+  "description": "Outbound Kata.fit relay connector for local MCP servers",
+  "type": "module",
+  "main": "src/connector.js",
+  "bin": {
+    "katafit-mcp-connector": "bin/katafit-mcp-connector.js"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  }
+}
