@@ -1,6 +1,6 @@
 {
   "name": "@kata-fit/mcp-connector",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Outbound Kata.fit relay connector for local MCP servers",
   "type": "module",
   "main": "src/connector.js",
