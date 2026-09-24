@@ -18,7 +18,7 @@ test('real loopback WebSocket transports a bounded synthetic ffmpeg camera JPEG 
   await new Promise(resolve => server.once('listening', resolve));
   const camera = new CameraTools({ devices: ['/dev/video0'], platform: 'linux',
     stat: async () => ({ isCharacterDevice: () => true }),
-    spawn: (_bin, _args, options) => spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin', '-f', 'lavfi', '-i', 'testsrc=size=320x240:rate=1', '-frames:v', '1', '-q:v', '8', '-f', 'image2pipe', '-vcodec', 'mjpeg', 'pipe:1'], options) });
+    spawn: (_bin, _args, options) => spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin', '-f', 'lavfi', '-i', 'color=c=blue:size=320x240:rate=1', '-frames:v', '1', '-q:v', '8', '-f', 'image2pipe', '-vcodec', 'mjpeg', 'pipe:1'], options) });
   const connector = new Connector({ relayUrl: `ws://127.0.0.1:${server.address().port}`, serverId: 'synthetic-server', enrollmentToken: 'synthetic-token', camera });
   try {
     const connected = new Promise(resolve => server.once('connection', resolve));
